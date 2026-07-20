@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.db.database import init_db
-from app.api import health, auth, companies, integrations, artifacts, agents
+from app.api import health, auth, companies, integrations, artifacts, agents, query, webhooks
 import contextlib
 import logging
 
@@ -45,6 +45,8 @@ app.include_router(companies.router, prefix="/api/companies", tags=["companies"]
 app.include_router(integrations.router, prefix="/api/integrations", tags=["integrations"])
 app.include_router(artifacts.router, prefix="/api/artifacts", tags=["artifacts"])
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
+app.include_router(query.router, prefix="/api/query", tags=["query"])
+app.include_router(webhooks.router, prefix="/api/webhooks", tags=["webhooks"])
 
 
 @app.get("/")

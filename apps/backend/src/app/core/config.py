@@ -36,6 +36,32 @@ class Settings(BaseSettings):
     # OAuth
     OAUTH_REDIRECT_URI: str = "http://localhost:3000/api/oauth/callback"
     
+    # Slack
+    SLACK_CLIENT_ID: Optional[str] = None
+    SLACK_CLIENT_SECRET: Optional[str] = None
+    SLACK_SIGNING_SECRET: Optional[str] = None
+    
+    # Google (Gmail, Drive, Calendar)
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    GOOGLE_CLIENT_SECRET: Optional[str] = None
+    
+    # GitHub
+    GITHUB_CLIENT_ID: Optional[str] = None
+    GITHUB_CLIENT_SECRET: Optional[str] = None
+    GITHUB_WEBHOOK_SECRET: Optional[str] = None
+    
+    # Linear
+    LINEAR_CLIENT_ID: Optional[str] = None
+    LINEAR_CLIENT_SECRET: Optional[str] = None
+    
+    # HubSpot
+    HUBSPOT_CLIENT_ID: Optional[str] = None
+    HUBSPOT_CLIENT_SECRET: Optional[str] = None
+    
+    # Notion
+    NOTION_CLIENT_ID: Optional[str] = None
+    NOTION_CLIENT_SECRET: Optional[str] = None
+    
     class Config:
         env_file = ".env"
         case_sensitive = True
