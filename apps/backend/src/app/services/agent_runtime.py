@@ -5,6 +5,16 @@ from app.models.agent_action import AgentAction as AgentActionModel, ApprovalSta
 from app.models.agent_intelligence import AgentIntelligence
 from app.models.artifact import Artifact
 from app.services.artifact_store import artifact_store_service
+from app.services.agents import (
+    OperationsAgent,
+    CustomerIntelligenceAgent,
+    RevenueAgent,
+    KnowledgeAgent,
+    FinanceAgent,
+    AlignmentAgent,
+    SpecAgent,
+    agent_dispatcher
+)
 from sqlalchemy import select
 import logging
 
@@ -17,6 +27,27 @@ class AgentRuntime:
     def __init__(self):
         self.registered_agents: Dict[str, BaseAgent] = {}
         self.active_executions: Dict[str, Any] = {}
+        self.dispatcher = agent_dispatcher
+        
+        # Auto-register all agents on initialization
+        self._register_all_agents()
+    
+    def _register_all_agents(self) -> None:
+        """Register all 7 specialized agents"""
+        agents = [
+            OperationsAgent(),
+            CustomerIntelligenceAgent(),
+            RevenueAgent(),
+            KnowledgeAgent(),
+            FinanceAgent(),
+            AlignmentAgent(),
+            SpecAgent()
+        ]
+        
+        for agent in agents:
+            self.register_agent(agent)
+        
+        logger.info(f"Registered {len(self.registered_agents)} agents: {list(self.registered_agents.keys())}")
     
     def register_agent(self, agent: BaseAgent) -> None:
         """Register an agent with the runtime"""
@@ -57,6 +88,62 @@ class AgentRuntime:
             await self._store_agent_outcome(db, action, outcome)
         
         return action, outcome
+    
+    async def dispatch_artifact(
+        self,
+        artifact_type: str,
+        source_tool: str,
+        content: str,
+        company_id: str,
+        db: AsyncSession,
+        artifact_id: Optional[str] = None
+    ) -> List[tuple[AgentAction, Optional[AgentOutcome]]]:
+        """
+        Dispatch an artifact to all relevant agents based on routing rules
+        
+        Args:
+            artifact_type: Type of artifact (message, email, ticket, etc.)
+            source_tool: Source tool (slack, gmail, hubspot, etc.)
+            content: Content of the artifact
+            company_id: Company ID
+            db: Database session
+            artifact_id: Optional artifact ID for reference
+        
+        Returns:
+            List of (action, outcome) tuples from all dispatched agents
+        """
+        # Get agents that should process this artifact
+        agent_names = self.dispatcher.route_artifact(artifact_type, source_tool, content)
+        
+        logger.info(f"Dispatching artifact {artifact_type}/{source_tool} to agents: {agent_names}")
+        
+        results = []
+        
+        for agent_name in agent_names:
+            try:
+                # Build context for this agent
+                context = await self.build_agent_context(
+                    db=db,
+                    company_id=company_id,
+                    agent_name=agent_name,
+                    additional_context={
+                        'artifact_type': artifact_type,
+                        'source_tool': source_tool,
+                        'artifact_content': content,
+                        'artifact_id': artifact_id
+                    }
+                )
+                
+                # Dispatch agent
+                action, outcome = await self.dispatch_agent(agent_name, context, db)
+                results.append((action, outcome))
+                
+            except Exception as e:
+                logger.error(f"Failed to dispatch artifact to agent {agent_name}: {e}")
+                # Continue with other agents even if one fails
+                continue
+        
+        return results
     
     async def _store_agent_action(self, db: AsyncSession, action: AgentAction) -> AgentActionModel:
         """Store agent action in database"""
