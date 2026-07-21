@@ -3,6 +3,7 @@
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import Link from "next/link"
 
 const INTEGRATIONS = [
   {
@@ -106,6 +107,75 @@ export default function IntegrationsPage() {
           </Card>
         ))}
         
+        <Link href="/integrations/mcp">
+          <Card className="hover:shadow-lg transition-shadow cursor-pointer border-primary/20">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <span className="text-2xl">🔌</span>
+                MCP Server Bridge
+                <Badge className="ml-auto">Phase 4</Badge>
+              </CardTitle>
+              <CardDescription>Connect any MCP-compatible server</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="text-sm space-y-2">
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant="secondary" className="text-xs">Model Context Protocol</Badge>
+                  <Badge variant="secondary" className="text-xs">SSE Transport</Badge>
+                  <Badge variant="secondary" className="text-xs">Stdio Transport</Badge>
+                  <Badge variant="secondary" className="text-xs">Tool Discovery</Badge>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+
+        <Link href="/integrations/rest">
+          <Card className="hover:shadow-lg transition-shadow cursor-pointer border-primary/20">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <span className="text-2xl">🌐</span>
+                REST API Connector
+                <Badge className="ml-auto">Phase 4</Badge>
+              </CardTitle>
+              <CardDescription>Generic REST API data source</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="text-sm space-y-2">
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant="secondary" className="text-xs">JSONPath Mapping</Badge>
+                  <Badge variant="secondary" className="text-xs">OAuth2 Support</Badge>
+                  <Badge variant="secondary" className="text-xs">Pagination</Badge>
+                  <Badge variant="secondary" className="text-xs">Scheduled Polling</Badge>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+
+        <Link href="/integrations/zapier">
+          <Card className="hover:shadow-lg transition-shadow cursor-pointer border-primary/20">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <span className="text-2xl">⚡</span>
+                Zapier / Make Bridge
+                <Badge className="ml-auto">Phase 4</Badge>
+              </CardTitle>
+              <CardDescription>5,000+ apps via webhooks</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="text-sm space-y-2">
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant="secondary" className="text-xs">Zapier</Badge>
+                  <Badge variant="secondary" className="text-xs">Make (Integromat)</Badge>
+                  <Badge variant="secondary" className="text-xs">HMAC Auth</Badge>
+                  <Badge variant="secondary" className="text-xs">Source Detection</Badge>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+
         <Card className="border-dashed">
           <CardHeader>
             <CardTitle>Coming Soon</CardTitle>

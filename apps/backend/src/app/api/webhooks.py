@@ -7,10 +7,12 @@ from app.services.integrations import (
     GitHubIntegration,
     LinearIntegration,
     HubSpotIntegration,
-    NotionIntegration
+    NotionIntegration,
+    ZapierBridgeIntegration
 )
 from app.models.integration import Integration, SourceTool
 from sqlalchemy import select
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -313,3 +315,177 @@ async def notion_webhook():
         "status": "not_implemented",
         "message": "Notion integration uses polling only (no webhooks)"
     }
+
+
+@router.post("/zapier")
+async def zapier_webhook(
+    request: Request,
+    x_hook_signature: str = Header(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handle Zapier webhook events
+    Zapier sends webhook events from 5,000+ connected apps
+    """
+    try:
+        body = await request.body()
+        company_id = request.headers.get('x-company-id')
+
+        if not company_id:
+            raise HTTPException(status_code=400, detail="Missing company_id header")
+
+        from app.models.webhook_config import WebhookConfig
+        from sqlalchemy import select
+
+        result = await db.execute(
+            select(WebhookConfig).where(
+                WebhookConfig.company_id == company_id,
+                WebhookConfig.source_tool == 'zapier',
+                WebhookConfig.enabled == True
+            )
+        )
+        webhook_config = result.scalar_one_or_none()
+
+        if not webhook_config:
+            raise HTTPException(status_code=404, detail="Zapier webhook configuration not found")
+
+        zapier_integration = ZapierBridgeIntegration(
+            company_id=company_id,
+            credentials_encrypted="",
+            settings={
+                'webhook_secret': webhook_config.webhook_secret,
+                'artifact_type': webhook_config.artifact_type,
+                'platform': 'zapier'
+            }
+        )
+
+        if not zapier_integration.validate_webhook_signature(x_hook_signature, body):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+        event_data = await request.json()
+        success = await zapier_integration.handle_webhook(db, event_data)
+
+        webhook_config.last_event_at = datetime.utcnow()
+        await db.commit()
+
+        if success:
+            return {"status": "success"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to process webhook")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Zapier webhook error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/make")
+async def make_webhook(
+    request: Request,
+    x_hook_signature: str = Header(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handle Make (formerly Integromat) webhook events
+    """
+    try:
+        body = await request.body()
+        company_id = request.headers.get('x-company-id')
+
+        if not company_id:
+            raise HTTPException(status_code=400, detail="Missing company_id header")
+
+        from app.models.webhook_config import WebhookConfig
+        from sqlalchemy import select
+
+        result = await db.execute(
+            select(WebhookConfig).where(
+                WebhookConfig.company_id == company_id,
+                WebhookConfig.source_tool == 'make',
+                WebhookConfig.enabled == True
+            )
+        )
+        webhook_config = result.scalar_one_or_none()
+
+        if not webhook_config:
+            raise HTTPException(status_code=404, detail="Make webhook configuration not found")
+
+        make_integration = ZapierBridgeIntegration(
+            company_id=company_id,
+            credentials_encrypted="",
+            settings={
+                'webhook_secret': webhook_config.webhook_secret,
+                'artifact_type': webhook_config.artifact_type,
+                'platform': 'make'
+            }
+        )
+
+        if not make_integration.validate_webhook_signature(x_hook_signature, body):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+        event_data = await request.json()
+        success = await make_integration.handle_webhook(db, event_data)
+
+        webhook_config.last_event_at = datetime.utcnow()
+        await db.commit()
+
+        if success:
+            return {"status": "success"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to process webhook")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Make webhook error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/webhook-config")
+async def create_webhook_config(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Create a webhook configuration for Zapier or Make
+    Generates a unique webhook URL path and secret
+    """
+    try:
+        data = await request.json()
+        company_id = data.get('company_id')
+        source_tool = data.get('source_tool', 'zapier')
+        artifact_type = data.get('artifact_type', 'message')
+
+        if not company_id:
+            raise HTTPException(status_code=400, detail="Missing company_id")
+
+        from app.models.webhook_config import WebhookConfig
+        import secrets
+
+        webhook_secret = secrets.token_hex(32)
+        webhook_url_path = f"{company_id}/{source_tool}/{secrets.token_hex(8)}"
+
+        webhook_config = WebhookConfig(
+            company_id=company_id,
+            source_tool=source_tool,
+            webhook_secret=webhook_secret,
+            webhook_url_path=webhook_url_path,
+            artifact_type=artifact_type,
+            enabled=True
+        )
+
+        db.add(webhook_config)
+        await db.commit()
+        await db.refresh(webhook_config)
+
+        return {
+            "status": "success",
+            "config_id": webhook_config.id,
+            "webhook_url": f"/api/webhooks/{source_tool}",
+            "webhook_secret": webhook_secret,
+            "instructions": {
+                "zapier": "Create a Webhook trigger in Zapier and POST JSON to the webhook URL. Include x-hook-signature header with HMAC-SHA256 of the body using the webhook_secret.",
+                "make": "Create a Webhook module in Make and POST JSON to the webhook URL. Include x-hook-signature header with HMAC-SHA256 of the body using the webhook_secret."
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create webhook config: {str(e)}")

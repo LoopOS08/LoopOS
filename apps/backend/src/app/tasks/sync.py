@@ -370,6 +370,117 @@ celery_app.conf.beat_schedule = {
 }
 
 
+@celery_app.task(bind=True, max_retries=3)
+def sync_mcp_task(self, company_id: str, server_id: str):
+    """
+    Sync data from an MCP server
+    """
+    import asyncio
+
+    async def _sync():
+        async_session = get_async_session()
+        async with async_session() as db:
+            try:
+                from app.models.mcp_server import MCPServer, MCPServerStatus
+
+                result = await db.execute(
+                    select(MCPServer).where(
+                        MCPServer.id == server_id,
+                        MCPServer.company_id == company_id
+                    )
+                )
+                server = result.scalar_one_or_none()
+
+                if not server:
+                    logger.warning(f"MCP server {server_id} not found for company {company_id}")
+                    return {"status": "not_found"}
+
+                from app.services.integrations.mcp_bridge import MCPBridgeIntegration
+
+                bridge = MCPBridgeIntegration(
+                    company_id=company_id,
+                    credentials_encrypted="",
+                    settings={'server_id': server.id}
+                )
+                await bridge.connect(server)
+                artifacts = await bridge.poll_data()
+                await bridge.disconnect()
+
+                synced_count = 0
+                for artifact in artifacts:
+                    if await bridge.store_artifact(db, artifact):
+                        synced_count += 1
+
+                server.last_sync_at = datetime.utcnow()
+                server.status = MCPServerStatus.CONNECTED
+                await db.commit()
+
+                logger.info(f"MCP sync completed for server {server.name}: {synced_count} artifacts")
+                return {"status": "success", "synced_artifacts": synced_count}
+
+            except Exception as e:
+                logger.error(f"MCP sync failed for server {server_id}: {e}")
+                await db.rollback()
+                raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+
+    return asyncio.run(_sync())
+
+
+@celery_app.task(bind=True, max_retries=3)
+def sync_rest_connector_task(self, company_id: str, connector_id: str):
+    """
+    Sync data from a REST API connector
+    """
+    import asyncio
+
+    async def _sync():
+        async_session = get_async_session()
+        async with async_session() as db:
+            try:
+                from app.models.rest_connector import RESTConnector, RESTConnectorStatus
+
+                result = await db.execute(
+                    select(RESTConnector).where(
+                        RESTConnector.id == connector_id,
+                        RESTConnector.company_id == company_id
+                    )
+                )
+                connector = result.scalar_one_or_none()
+
+                if not connector:
+                    logger.warning(f"REST connector {connector_id} not found for company {company_id}")
+                    return {"status": "not_found"}
+
+                from app.services.integrations.rest_connector_service import RESTConnectorIntegration
+
+                integration = RESTConnectorIntegration(
+                    company_id=company_id,
+                    credentials_encrypted="",
+                    settings={}
+                )
+                integration.configure(connector)
+                artifacts = await integration.poll_data()
+
+                synced_count = 0
+                for artifact in artifacts:
+                    if await integration.store_artifact(db, artifact):
+                        synced_count += 1
+
+                connector.last_sync_at = datetime.utcnow()
+                connector.status = RESTConnectorStatus.ACTIVE
+                await db.commit()
+
+                logger.info(f"REST connector sync completed for {connector.name}: {synced_count} artifacts")
+                return {"status": "success", "synced_artifacts": synced_count}
+
+            except Exception as e:
+                logger.error(f"REST connector sync failed for {connector_id}: {e}")
+                await db.rollback()
+                raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+
+    return asyncio.run(_sync())
+
+
 @celery_app.task
 def schedule_company_syncs():
     """
@@ -377,7 +488,7 @@ def schedule_company_syncs():
     This task runs every 5 minutes and checks for new/updated integrations
     """
     import asyncio
-    
+
     async def _schedule():
         async_session = get_async_session()
         async with async_session() as db:
@@ -389,14 +500,14 @@ def schedule_company_syncs():
                     )
                 )
                 integrations = result.scalars().all()
-                
+
                 # Group by company
                 company_integrations = {}
                 for integration in integrations:
                     if integration.company_id not in company_integrations:
                         company_integrations[integration.company_id] = []
                     company_integrations[integration.company_id].append(integration.source_tool)
-                
+
                 # Schedule tasks for each company's integrations
                 scheduled_tasks = []
                 for company_id, tools in company_integrations.items():
@@ -412,12 +523,32 @@ def schedule_company_syncs():
                         scheduled_tasks.append(sync_hubspot_task.delay(company_id))
                     if SourceTool.NOTION in tools:
                         scheduled_tasks.append(sync_notion_task.delay(company_id))
-                
-                logger.info(f"Scheduled {len(scheduled_tasks)} sync tasks for {len(company_integrations)} companies")
+
+                # Schedule MCP server syncs for active servers
+                from app.models.mcp_server import MCPServer, MCPServerStatus
+
+                mcp_result = await db.execute(
+                    select(MCPServer).where(MCPServer.status == MCPServerStatus.CONNECTED)
+                )
+                mcp_servers = mcp_result.scalars().all()
+                for server in mcp_servers:
+                    scheduled_tasks.append(sync_mcp_task.delay(server.company_id, server.id))
+
+                # Schedule REST connector syncs for active connectors
+                from app.models.rest_connector import RESTConnector, RESTConnectorStatus
+
+                rest_result = await db.execute(
+                    select(RESTConnector).where(RESTConnector.status == RESTConnectorStatus.ACTIVE)
+                )
+                rest_connectors = rest_result.scalars().all()
+                for connector in rest_connectors:
+                    scheduled_tasks.append(sync_rest_connector_task.delay(connector.company_id, connector.id))
+
+                logger.info(f"Scheduled {len(scheduled_tasks)} sync tasks for {len(company_integrations)} companies + Phase 4 connectors")
                 return {"status": "success", "scheduled_tasks": len(scheduled_tasks)}
-                
+
             except Exception as e:
                 logger.error(f"Failed to schedule company syncs: {e}")
                 return {"status": "error", "error": str(e)}
-    
+
     return asyncio.run(_schedule())

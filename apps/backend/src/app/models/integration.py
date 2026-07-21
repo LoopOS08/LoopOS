@@ -21,6 +21,10 @@ class SourceTool(enum.Enum):
     ASANA = "asana"
     QUICKBOOKS = "quickbooks"
     INTERCOM = "intercom"
+    MCP = "mcp"
+    ZAPIER = "zapier"
+    MAKE = "make"
+    REST_API = "rest_api"
 
 
 class IntegrationStatus(enum.Enum):

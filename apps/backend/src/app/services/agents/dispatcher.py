@@ -79,6 +79,22 @@ class AgentDispatcher:
             # Salesforce deals and contacts
             ('deal', 'salesforce'): ['revenue', 'customer_intelligence'],
             ('contact', 'salesforce'): ['customer_intelligence'],
+
+            # MCP bridge (universal - routes to knowledge by default)
+            ('message', 'mcp'): ['knowledge'],
+            ('document', 'mcp'): ['knowledge', 'alignment'],
+
+            # Zapier/Make bridge (source-specific routing determined by content)
+            ('message', 'zapier'): ['knowledge'],
+            ('email', 'zapier'): ['customer_intelligence', 'knowledge'],
+            ('ticket', 'zapier'): ['operations', 'alignment'],
+            ('deal', 'zapier'): ['revenue', 'customer_intelligence'],
+            ('message', 'make'): ['knowledge'],
+            ('email', 'make'): ['customer_intelligence', 'knowledge'],
+            ('ticket', 'make'): ['operations', 'alignment'],
+
+            # REST API custom connector
+            ('message', 'rest_api'): ['knowledge'],
         }
         
         # Default agents for unknown artifact types

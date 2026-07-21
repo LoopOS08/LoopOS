@@ -49,6 +49,9 @@ async def init_db():
         from app.models.outcome import Outcome
         from app.models.spec import Spec
         from app.models.agent_intelligence import AgentIntelligence
+        from app.models.mcp_server import MCPServer
+        from app.models.rest_connector import RESTConnector
+        from app.models.webhook_config import WebhookConfig
         
         # Create all tables
         await conn.run_sync(Base.metadata.create_all)

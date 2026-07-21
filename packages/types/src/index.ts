@@ -48,7 +48,11 @@ export type SourceTool =
   | 'teams'
   | 'asana'
   | 'quickbooks'
-  | 'intercom';
+  | 'intercom'
+  | 'mcp'
+  | 'zapier'
+  | 'make'
+  | 'rest_api';
 
 // Artifact types
 export interface Artifact {
