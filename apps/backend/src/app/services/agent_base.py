@@ -1,8 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from pydantic import BaseModel
 from enum import Enum
 import json
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class AgentPhase(Enum):
@@ -22,6 +25,9 @@ class AgentContext(BaseModel):
     recent_actions: List[Dict[str, Any]]
     agent_intelligence: Dict[str, Any]
     additional_context: Dict[str, Any] = {}
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class AgentReasoning(BaseModel):
@@ -117,28 +123,26 @@ class BaseAgent(ABC):
         """
         pass
     
-    async def execute(self, initial_context: AgentContext) -> tuple[AgentAction, Optional[AgentOutcome]]:
-        """
-        Execute the complete five-phase agent workflow
-        """
-        # Phase 1: Context Retrieval
+    async def execute(
+        self,
+        initial_context: AgentContext,
+        db: Optional[Any] = None,
+    ) -> tuple[AgentAction, Optional[AgentOutcome]]:
         enriched_context = await self.phase1_context_retrieval(initial_context)
-        
-        # Phase 2: Reasoning
+
         reasoning = await self.phase2_reasoning(enriched_context)
-        
-        # Phase 3: Action Execution
+
+        if db:
+            enriched_context.additional_context['db_session'] = db
         action = await self.phase3_action_execution(reasoning, enriched_context)
-        
-        # Phase 4: Outcome Measurement (only if action was executed)
+
         outcome = None
         if reasoning.should_act:
             outcome = await self.phase4_outcome_measurement(action)
-        
-        # Phase 5: Learning (only if action was executed and outcome measured)
+
         if outcome:
             await self.phase5_learning(action, outcome)
-        
+
         return action, outcome
     
     def has_permission(self, permission: str) -> bool:

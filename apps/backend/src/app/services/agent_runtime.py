@@ -4,7 +4,9 @@ from app.services.agent_base import BaseAgent, AgentContext, AgentAction, AgentO
 from app.models.agent_action import AgentAction as AgentActionModel, ApprovalStatus
 from app.models.agent_intelligence import AgentIntelligence
 from app.models.artifact import Artifact
+from app.models.goal import Goal, GoalStatus
 from app.services.artifact_store import artifact_store_service
+from app.services.agent_actions import action_executor
 from app.services.agents import (
     OperationsAgent,
     CustomerIntelligenceAgent,
@@ -16,6 +18,7 @@ from app.services.agents import (
     agent_dispatcher
 )
 from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -68,25 +71,22 @@ class AgentRuntime:
         context: AgentContext,
         db: AsyncSession
     ) -> tuple[AgentAction, Optional[AgentOutcome]]:
-        """
-        Dispatch an agent to execute with given context
-        """
+        """Dispatch an agent to execute with given context"""
         agent = self.get_agent(agent_name)
         if not agent:
             raise ValueError(f"Agent not found: {agent_name}")
-        
+
         logger.info(f"Dispatching agent: {agent_name}")
-        
-        # Execute the agent
-        action, outcome = await agent.execute(context)
-        
-        # Store the action in database
+
+        context.additional_context['db_session'] = db
+
+        action, outcome = await agent.execute(context, db=db)
+
         await self._store_agent_action(db, action)
-        
-        # Store outcome if available
+
         if outcome:
             await self._store_agent_outcome(db, action, outcome)
-        
+
         return action, outcome
     
     async def dispatch_artifact(
@@ -297,45 +297,88 @@ class AgentRuntime:
     ) -> AgentContext:
         """Build context package for agent execution"""
         try:
-            # Load agent intelligence
             intelligence = await self.load_agent_intelligence(db, company_id, agent_name)
-            
-            # Get recent artifacts (placeholder - would be more sophisticated)
-            # For now, get recent 10 artifacts
+
+            now = datetime.now(timezone.utc)
+            seven_days_ago = now - timedelta(days=7)
+
             artifacts = await artifact_store_service.get_company_artifacts(
-                db, company_id, limit=10
+                db, company_id, limit=50
             )
-            
+
             relevant_artifacts = [
                 {
                     'id': artifact.id,
                     'content': artifact.content,
-                    'source_tool': artifact.source_tool.value,
-                    'artifact_type': artifact.artifact_type.value,
+                    'source_tool': artifact.source_tool.value if hasattr(artifact.source_tool, 'value') else str(artifact.source_tool),
+                    'artifact_type': artifact.artifact_type.value if hasattr(artifact.artifact_type, 'value') else str(artifact.artifact_type),
                     'author': artifact.author,
-                    'created_at': artifact.created_at.isoformat()
+                    'created_at': artifact.created_at.isoformat() if artifact.created_at else '',
+                    'metadata': artifact.artifact_metadata or {},
                 }
                 for artifact in artifacts
             ]
-            
-            # Get current goal state (placeholder)
+
+            goal_result = await db.execute(
+                select(Goal).where(
+                    Goal.company_id == company_id
+                )
+            )
+            goals = goal_result.scalars().all()
+            goal_list = []
+            overall_statuses = set()
+            for g in goals:
+                status_val = g.status.value if hasattr(g.status, 'value') else str(g.status)
+                goal_list.append({
+                    'id': g.id,
+                    'metric_name': g.metric_name,
+                    'target_value': g.target_value,
+                    'current_value': g.current_value,
+                    'operator': g.operator.value if hasattr(g.operator, 'value') else str(g.operator),
+                    'status': status_val,
+                })
+                overall_statuses.add(status_val)
+
+            if GoalStatus.OFF_TRACK in overall_statuses:
+                overall = 'off_track'
+            elif GoalStatus.AT_RISK in overall_statuses:
+                overall = 'at_risk'
+            else:
+                overall = 'on_track'
+
             current_goal_state = {
-                'goals': [],  # Would load from goals table
-                'overall_status': 'unknown'
+                'goals': goal_list,
+                'overall_status': overall,
             }
-            
-            # Get recent actions (placeholder)
-            recent_actions = []  # Would load from agent_actions table
-            
+
+            thirty_days_ago = now - timedelta(days=30)
+            actions_result = await db.execute(
+                select(AgentActionModel).where(
+                    AgentActionModel.company_id == company_id,
+                    AgentActionModel.agent_name == agent_name,
+                    AgentActionModel.created_at >= thirty_days_ago,
+                ).order_by(AgentActionModel.created_at.desc()).limit(10)
+            )
+            recent_actions = []
+            for a in actions_result.scalars().all():
+                recent_actions.append({
+                    'id': a.id,
+                    'action_type': a.action_type,
+                    'reasoning': a.reasoning,
+                    'output': a.output,
+                    'approval_status': a.approval_status.value if a.approval_status else None,
+                    'created_at': a.created_at.isoformat() if a.created_at else '',
+                })
+
             return AgentContext(
                 company_id=company_id,
                 relevant_artifacts=relevant_artifacts,
                 current_goal_state=current_goal_state,
                 recent_actions=recent_actions,
                 agent_intelligence=intelligence,
-                additional_context=additional_context or {}
+                additional_context=additional_context or {},
             )
-            
+
         except Exception as e:
             logger.error(f"Failed to build agent context: {e}")
             raise
@@ -346,9 +389,8 @@ class PermissionControl:
     
     def __init__(self):
         self.permission_rules: Dict[str, List[str]] = {
-            # Default permission rules per agent type
-            'operations': ['read_artifacts', 'create_tickets', 'update_status'],
-            'customer_intelligence': ['read_artifacts', 'read_crm', 'analyze_customers'],
+            'operations': ['read_artifacts', 'create_tickets', 'update_status', 'post_slack'],
+            'customer_intelligence': ['read_artifacts', 'read_crm', 'analyze_customers', 'read_email'],
             'revenue': ['read_artifacts', 'read_crm', 'analyze_deals'],
             'knowledge': ['read_artifacts', 'extract_decisions', 'create_specs'],
             'finance': ['read_artifacts', 'read_financials', 'analyze_metrics'],

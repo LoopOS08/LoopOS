@@ -371,7 +371,15 @@ from celery.schedules import crontab
 celery_app.conf.beat_schedule = {
     'sync-all-integrations': {
         'task': 'app.tasks.sync.schedule_company_syncs',
-        'schedule': crontab(minute='*/15'),  # Every 15 minutes
+        'schedule': crontab(minute='*/15'),
+    },
+    'goal-state-comparator': {
+        'task': 'app.tasks.agent_tasks.goal_state_comparator_task',
+        'schedule': crontab(minute='*/15'),
+    },
+    'flywheel-engine': {
+        'task': 'app.tasks.agent_tasks.flywheel_engine_task',
+        'schedule': crontab(hour=2, minute=0),
     },
 }
 

@@ -25,6 +25,7 @@ class SourceTool(enum.Enum):
     ZAPIER = "zapier"
     MAKE = "make"
     REST_API = "rest_api"
+    INTERNAL = "loopos"
 
 
 class IntegrationStatus(enum.Enum):

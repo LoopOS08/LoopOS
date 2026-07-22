@@ -19,6 +19,7 @@ class ArtifactType(enum.Enum):
     REVIEW = "review"
     COMMENT = "comment"
     BUILD = "build"
+    BRIEFING = "briefing"
 
 
 class Artifact(Base):
