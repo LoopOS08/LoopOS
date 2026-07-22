@@ -33,8 +33,8 @@ class Artifact(Base):
     author = Column(String, nullable=False)
     author_email = Column(String, nullable=False)
     source_created_at = Column(DateTime(timezone=True), nullable=False)
-    metadata = Column(JSON, default=dict)
-    embedding = Column(JSON, nullable=True)  # Stored as JSON array for pgvector compatibility
+    artifact_metadata = Column("metadata", JSON, default=dict)
+    embedding = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

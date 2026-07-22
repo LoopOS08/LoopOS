@@ -1,8 +1,11 @@
+from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 from app.models.artifact import SourceTool, ArtifactType
 from app.services.artifact_store import artifact_store_service
 from app.services.embeddings import embedding_service
+from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -156,20 +159,38 @@ class QueryService:
         return '\n---\n'.join(context_parts)
     
     async def _generate_answer(self, question: str, context: str) -> str:
-        """
-        Generate answer using LLM with context
-        In production, this would use Claude 3.5 Sonnet
-        """
-        # For now, return a simple answer based on context
-        # In production, this would call the LLM API
-        
         if not context or context.strip() == "":
             return "I couldn't find any relevant information to answer your question."
-        
-        # Simple template-based answer (in production, use LLM)
-        answer = f"Based on the information in your connected tools, here's what I found:\n\n{context}"
-        
-        return answer
+
+        system_prompt = (
+            "You are LoopOS, a connective intelligence layer for company operations. "
+            "Answer the user's question using ONLY the provided context from their connected tools. "
+            "Each context block is tagged with [Source: tool | Type: type | Author: name | Date: date | Relevance: score]. "
+            "Cite specific sources in your answer. If the context doesn't contain enough information, "
+            "say so clearly. Do not make up information. "
+            "Format your answer in a clear, readable way with bullet points where appropriate."
+        )
+
+        user_prompt = f"Question: {question}\n\nContext from connected tools:\n{context}"
+
+        try:
+            if settings.OPENAI_API_KEY:
+                client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+                response = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=1024
+                )
+                return response.choices[0].message.content
+            else:
+                return f"Based on the information in your connected tools:\n\n{context}"
+        except Exception as e:
+            logger.error(f"LLM answer generation failed: {e}")
+            return f"Based on the information in your connected tools:\n\n{context}"
     
     def _format_sources(
         self,
@@ -188,7 +209,7 @@ class QueryService:
                 'date': artifact.source_created_at.strftime('%Y-%m-%d %H:%M'),
                 'preview': artifact.content[:200] + '...' if len(artifact.content) > 200 else artifact.content,
                 'similarity': round(similarity, 3),
-                'metadata': artifact.metadata
+                'metadata': artifact.artifact_metadata
             }
             
             sources.append(source)
@@ -315,7 +336,7 @@ class QueryService:
                     'author_email': artifact.author_email,
                     'date': artifact.source_created_at.isoformat(),
                     'similarity': round(similarity, 3),
-                    'metadata': artifact.metadata
+                    'metadata': artifact.artifact_metadata
                 }
                 
                 results.append(result)

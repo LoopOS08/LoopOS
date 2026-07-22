@@ -1,8 +1,12 @@
 from celery import Celery
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from app.models.integration import Integration, SourceTool, IntegrationStatus
+from app.services.integrations.slack import SlackIntegration
+from app.services.integrations.gmail import GmailIntegration
+from app.services.integrations.github import GitHubIntegration
+from app.services.integrations.linear import LinearIntegration
+from app.services.integrations.hubspot import HubSpotIntegration
+from app.services.integrations.notion import NotionIntegration
 from sqlalchemy import select
 from datetime import datetime, timedelta
 import logging
@@ -33,6 +37,8 @@ celery_app.conf.update(
 
 def get_async_session():
     """Create async database session for Celery tasks"""
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
     engine = create_async_engine(settings.DATABASE_URL)
     async_session = sessionmaker(
         engine, class_=AsyncSession, expire_on_commit=False

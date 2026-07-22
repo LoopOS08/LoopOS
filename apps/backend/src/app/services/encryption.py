@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
 from typing import Dict, Any
@@ -53,8 +54,8 @@ class EncryptionService:
             # Create AESGCM cipher
             aesgcm = AESGCM(key)
             
-            # Generate random nonce (96 bits for GCM)
-            nonce = AESGCM.generate_nonce(bit_length=96)
+            # Generate random nonce (96 bits = 12 bytes for GCM)
+            nonce = os.urandom(12)
             
             # Encrypt the plaintext
             plaintext_bytes = plaintext.encode('utf-8')

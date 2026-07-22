@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, Request, Header, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.services.integrations import (
@@ -11,6 +11,10 @@ from app.services.integrations import (
     ZapierBridgeIntegration
 )
 from app.models.integration import Integration, SourceTool
+from app.models.artifact import Artifact, ArtifactType
+from app.services.agent_runtime import agent_runtime
+from app.services.artifact_store import artifact_store_service
+from app.services.relationships import relationship_tracker
 from sqlalchemy import select
 from datetime import datetime
 import logging
@@ -20,27 +24,100 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def dispatch_to_agents(
+    db: AsyncSession,
+    company_id: str,
+    artifact_type: str,
+    source_tool: str,
+    content: str,
+    artifact_id: str
+):
+    try:
+        results = await agent_runtime.dispatch_artifact(
+            artifact_type=artifact_type,
+            source_tool=source_tool,
+            content=content,
+            company_id=company_id,
+            db=db,
+            artifact_id=artifact_id
+        )
+        logger.info(f"Dispatched artifact {artifact_id} to {len(results)} agents")
+    except Exception as e:
+        logger.error(f"Agent dispatch failed for artifact {artifact_id}: {e}")
+
+
+async def track_artifact_relationships(
+    db: AsyncSession,
+    company_id: str,
+    artifact_id: str,
+    source_tool: str,
+    artifact_type: str
+):
+    try:
+        result = await db.execute(
+            select(Artifact).where(Artifact.id == artifact_id)
+        )
+        artifact = result.scalar_one_or_none()
+        if artifact:
+            related = await relationship_tracker.track_relationships(db, artifact)
+            if related:
+                logger.info(f"Tracked {len(related)} relationships for artifact {artifact_id}")
+    except Exception as e:
+        logger.error(f"Relationship tracking failed for {artifact_id}: {e}")
+
+
+async def process_webhook_and_dispatch(
+    db: AsyncSession,
+    company_id: str,
+    integration_instance,
+    event_data: Dict[str, Any],
+    background_tasks: BackgroundTasks
+) -> bool:
+    artifact = await integration_instance.process_webhook(event_data)
+    if not artifact:
+        logger.warning(f"Webhook processing returned no artifact for {integration_instance.source_tool.value}")
+        return False
+
+    stored = await integration_instance.store_artifact(db, artifact)
+    if not stored:
+        return False
+
+    stored_artifact = await artifact_store_service.get_artifact_by_external_id(
+        db, company_id, integration_instance.source_tool, artifact.external_id
+    )
+    if stored_artifact:
+        background_tasks.add_task(
+            dispatch_to_agents,
+            db, company_id,
+            artifact.artifact_type.value,
+            artifact.source_tool.value,
+            artifact.content,
+            stored_artifact.id
+        )
+        background_tasks.add_task(
+            track_artifact_relationships,
+            db, company_id, stored_artifact.id,
+            artifact.source_tool.value,
+            artifact.artifact_type.value
+        )
+
+    return True
+
+
 @router.post("/slack")
 async def slack_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_slack_signature: str = Header(None),
     x_slack_timestamp: str = Header(None),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Handle Slack webhooks
-    """
     try:
-        # Get raw body for signature validation
         body = await request.body()
-        
-        # Get company ID from request (in production, this would come from auth)
         company_id = request.headers.get('x-company-id')
-        
         if not company_id:
             raise HTTPException(status_code=400, detail="Missing company_id header")
-        
-        # Get integration for this company
+
         result = await db.execute(
             select(Integration).where(
                 Integration.company_id == company_id,
@@ -48,37 +125,28 @@ async def slack_webhook(
             )
         )
         integration = result.scalar_one_or_none()
-        
         if not integration:
             raise HTTPException(status_code=404, detail="Slack integration not found")
-        
-        # Create integration instance
+
         slack_integration = SlackIntegration(
             company_id=company_id,
             credentials_encrypted=integration.credentials_encrypted,
             settings=integration.settings
         )
-        
-        # Validate signature
+
         if not slack_integration.validate_webhook_signature(x_slack_signature, body):
             raise HTTPException(status_code=401, detail="Invalid signature")
-        
-        # Parse JSON body
+
         event_data = await request.json()
-        
-        # Handle URL verification challenge
         if event_data.get('type') == 'url_verification':
-            challenge = event_data.get('challenge')
-            return {"challenge": challenge}
-        
-        # Process webhook
-        success = await slack_integration.handle_webhook(db, event_data)
-        
+            return {"challenge": event_data.get('challenge')}
+
+        success = await process_webhook_and_dispatch(
+            db, company_id, slack_integration, event_data, background_tasks
+        )
         if success:
             return {"status": "success"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to process webhook")
-            
+        raise HTTPException(status_code=500, detail="Failed to process webhook")
     except HTTPException:
         raise
     except Exception as e:
@@ -89,19 +157,14 @@ async def slack_webhook(
 @router.post("/gmail")
 async def gmail_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Handle Gmail Pub/Sub push notifications
-    """
     try:
-        # Get company ID from request
         company_id = request.headers.get('x-company-id')
-        
         if not company_id:
             raise HTTPException(status_code=400, detail="Missing company_id header")
-        
-        # Get integration for this company
+
         result = await db.execute(
             select(Integration).where(
                 Integration.company_id == company_id,
@@ -109,28 +172,22 @@ async def gmail_webhook(
             )
         )
         integration = result.scalar_one_or_none()
-        
         if not integration:
             raise HTTPException(status_code=404, detail="Gmail integration not found")
-        
-        # Create integration instance
+
         gmail_integration = GmailIntegration(
             company_id=company_id,
             credentials_encrypted=integration.credentials_encrypted,
             settings=integration.settings
         )
-        
-        # Parse JSON body
+
         event_data = await request.json()
-        
-        # Process webhook
-        success = await gmail_integration.handle_webhook(db, event_data)
-        
+        success = await process_webhook_and_dispatch(
+            db, company_id, gmail_integration, event_data, background_tasks
+        )
         if success:
             return {"status": "success"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to process webhook")
-            
+        raise HTTPException(status_code=500, detail="Failed to process webhook")
     except HTTPException:
         raise
     except Exception as e:
@@ -141,24 +198,17 @@ async def gmail_webhook(
 @router.post("/github")
 async def github_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_hub_signature_256: str = Header(None),
     x_github_event: str = Header(None),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Handle GitHub webhooks
-    """
     try:
-        # Get raw body for signature validation
         body = await request.body()
-        
-        # Get company ID from request
         company_id = request.headers.get('x-company-id')
-        
         if not company_id:
             raise HTTPException(status_code=400, detail="Missing company_id header")
-        
-        # Get integration for this company
+
         result = await db.execute(
             select(Integration).where(
                 Integration.company_id == company_id,
@@ -166,33 +216,27 @@ async def github_webhook(
             )
         )
         integration = result.scalar_one_or_none()
-        
         if not integration:
             raise HTTPException(status_code=404, detail="GitHub integration not found")
-        
-        # Create integration instance
+
         github_integration = GitHubIntegration(
             company_id=company_id,
             credentials_encrypted=integration.credentials_encrypted,
             settings=integration.settings
         )
-        
-        # Validate signature
+
         if not github_integration.validate_webhook_signature(x_hub_signature_256, body):
             raise HTTPException(status_code=401, detail="Invalid signature")
-        
-        # Parse JSON body and add event type
+
         event_data = await request.json()
         event_data['x-github-event'] = x_github_event
-        
-        # Process webhook
-        success = await github_integration.handle_webhook(db, event_data)
-        
+
+        success = await process_webhook_and_dispatch(
+            db, company_id, github_integration, event_data, background_tasks
+        )
         if success:
             return {"status": "success"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to process webhook")
-            
+        raise HTTPException(status_code=500, detail="Failed to process webhook")
     except HTTPException:
         raise
     except Exception as e:
@@ -203,20 +247,15 @@ async def github_webhook(
 @router.post("/linear")
 async def linear_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_linear_signature: str = Header(None),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Handle Linear webhooks
-    """
     try:
-        # Get company ID from request
         company_id = request.headers.get('x-company-id')
-        
         if not company_id:
             raise HTTPException(status_code=400, detail="Missing company_id header")
-        
-        # Get integration for this company
+
         result = await db.execute(
             select(Integration).where(
                 Integration.company_id == company_id,
@@ -224,28 +263,22 @@ async def linear_webhook(
             )
         )
         integration = result.scalar_one_or_none()
-        
         if not integration:
             raise HTTPException(status_code=404, detail="Linear integration not found")
-        
-        # Create integration instance
+
         linear_integration = LinearIntegration(
             company_id=company_id,
             credentials_encrypted=integration.credentials_encrypted,
             settings=integration.settings
         )
-        
-        # Parse JSON body
+
         event_data = await request.json()
-        
-        # Process webhook
-        success = await linear_integration.handle_webhook(db, event_data)
-        
+        success = await process_webhook_and_dispatch(
+            db, company_id, linear_integration, event_data, background_tasks
+        )
         if success:
             return {"status": "success"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to process webhook")
-            
+        raise HTTPException(status_code=500, detail="Failed to process webhook")
     except HTTPException:
         raise
     except Exception as e:
@@ -256,19 +289,14 @@ async def linear_webhook(
 @router.post("/hubspot")
 async def hubspot_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Handle HubSpot webhooks
-    """
     try:
-        # Get company ID from request
         company_id = request.headers.get('x-company-id')
-        
         if not company_id:
             raise HTTPException(status_code=400, detail="Missing company_id header")
-        
-        # Get integration for this company
+
         result = await db.execute(
             select(Integration).where(
                 Integration.company_id == company_id,
@@ -276,28 +304,22 @@ async def hubspot_webhook(
             )
         )
         integration = result.scalar_one_or_none()
-        
         if not integration:
             raise HTTPException(status_code=404, detail="HubSpot integration not found")
-        
-        # Create integration instance
+
         hubspot_integration = HubSpotIntegration(
             company_id=company_id,
             credentials_encrypted=integration.credentials_encrypted,
             settings=integration.settings
         )
-        
-        # Parse JSON body
+
         event_data = await request.json()
-        
-        # Process webhook
-        success = await hubspot_integration.handle_webhook(db, event_data)
-        
+        success = await process_webhook_and_dispatch(
+            db, company_id, hubspot_integration, event_data, background_tasks
+        )
         if success:
             return {"status": "success"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to process webhook")
-            
+        raise HTTPException(status_code=500, detail="Failed to process webhook")
     except HTTPException:
         raise
     except Exception as e:
@@ -307,10 +329,6 @@ async def hubspot_webhook(
 
 @router.get("/notion")
 async def notion_webhook():
-    """
-    Notion doesn't support webhooks
-    This endpoint is provided for consistency
-    """
     return {
         "status": "not_implemented",
         "message": "Notion integration uses polling only (no webhooks)"

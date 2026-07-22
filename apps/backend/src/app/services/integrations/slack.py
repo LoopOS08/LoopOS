@@ -2,11 +2,13 @@ import httpx
 import json
 import hashlib
 import hmac
+import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from app.services.integrations.base import BaseIntegration, NormalizedArtifact
 from app.models.integration import SourceTool
 from app.models.artifact import ArtifactType
+from app.services.rate_limiter import RateLimiter, exponential_backoff_delay
 import logging
 
 logger = logging.getLogger(__name__)
@@ -39,38 +41,46 @@ class SlackIntegration(BaseIntegration):
         super().__init__(company_id, credentials_encrypted, settings)
         self.base_url = "https://slack.com/api"
         self._http_client = None
+        self._rate_limiter = RateLimiter(max_calls=50, period_seconds=60.0)
+        self._tier = settings.get('slack_api_tier', 3)
+        if self._tier == 2:
+            self._rate_limiter = RateLimiter(max_calls=20, period_seconds=60.0)
+    
+    async def _rate_limited_request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        for attempt in range(3):
+            await self._rate_limiter.acquire()
+            client = await self._get_http_client()
+            response = await client.request(method, url, **kwargs)
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', exponential_backoff_delay(attempt)))
+                logger.warning(f"Slack rate limited, retrying after {retry_after}s")
+                await asyncio.sleep(retry_after)
+                continue
+            return response
+        return response
     
     async def _get_http_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client"""
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(timeout=30.0)
         return self._http_client
     
     async def authenticate(self) -> bool:
-        """Validate Slack credentials using auth.test"""
         try:
             credentials = await self.get_credentials()
             access_token = credentials.get('access_token')
-            
             if not access_token:
                 logger.error("No access token in credentials")
                 return False
-            
-            client = await self._get_http_client()
-            response = await client.post(
-                f"{self.base_url}/auth.test",
+            response = await self._rate_limited_request(
+                "POST", f"{self.base_url}/auth.test",
                 headers={"Authorization": f"Bearer {access_token}"}
             )
-            
             data = response.json()
-            
             if not data.get('ok'):
                 logger.error(f"Slack auth.test failed: {data.get('error')}")
                 return False
-            
             logger.info(f"Slack authentication successful for team: {data.get('team')}")
             return True
-            
         except Exception as e:
             logger.error(f"Slack authentication failed: {e}")
             return False
@@ -338,100 +348,70 @@ class SlackIntegration(BaseIntegration):
             return None
     
     async def _get_user_info(self, user_id: str) -> Dict[str, Any]:
-        """Get user information from Slack API"""
         try:
             credentials = await self.get_credentials()
             access_token = credentials.get('access_token')
-            
-            client = await self._get_http_client()
-            response = await client.post(
-                f"{self.base_url}/users.info",
+            response = await self._rate_limited_request(
+                "POST", f"{self.base_url}/users.info",
                 headers={"Authorization": f"Bearer {access_token}"},
                 data={"user": user_id}
             )
-            
             data = response.json()
-            
             if data.get('ok'):
                 return data.get('user', {})
-            else:
-                logger.warning(f"Failed to get user info for {user_id}: {data.get('error')}")
-                return {}
-                
+            logger.warning(f"Failed to get user info for {user_id}: {data.get('error')}")
+            return {}
         except Exception as e:
             logger.error(f"Error getting user info: {e}")
             return {}
     
     async def _get_channel_info(self, channel_id: str) -> Dict[str, Any]:
-        """Get channel information from Slack API"""
         try:
             credentials = await self.get_credentials()
             access_token = credentials.get('access_token')
-            
-            client = await self._get_http_client()
-            response = await client.post(
-                f"{self.base_url}/conversations.info",
+            response = await self._rate_limited_request(
+                "POST", f"{self.base_url}/conversations.info",
                 headers={"Authorization": f"Bearer {access_token}"},
                 data={"channel": channel_id}
             )
-            
             data = response.json()
-            
             if data.get('ok'):
                 return data.get('channel', {})
-            else:
-                logger.warning(f"Failed to get channel info for {channel_id}: {data.get('error')}")
-                return {}
-                
+            logger.warning(f"Failed to get channel info for {channel_id}: {data.get('error')}")
+            return {}
         except Exception as e:
             logger.error(f"Error getting channel info: {e}")
             return {}
     
     async def _get_file_info(self, file_id: str) -> Dict[str, Any]:
-        """Get file information from Slack API"""
         try:
             credentials = await self.get_credentials()
             access_token = credentials.get('access_token')
-            
-            client = await self._get_http_client()
-            response = await client.post(
-                f"{self.base_url}/files.info",
+            response = await self._rate_limited_request(
+                "POST", f"{self.base_url}/files.info",
                 headers={"Authorization": f"Bearer {access_token}"},
                 data={"file": file_id}
             )
-            
             data = response.json()
-            
             if data.get('ok'):
                 return data.get('file', {})
-            else:
-                logger.warning(f"Failed to get file info for {file_id}: {data.get('error')}")
-                return {}
-                
+            logger.warning(f"Failed to get file info for {file_id}: {data.get('error')}")
+            return {}
         except Exception as e:
             logger.error(f"Error getting file info: {e}")
             return {}
     
     async def poll_data(self, since: Optional[datetime] = None) -> List[NormalizedArtifact]:
-        """
-        Poll for missed data using Slack Web API
-        Also used for initial history backfill
-        """
         try:
             credentials = await self.get_credentials()
             access_token = credentials.get('access_token')
             
-            client = await self._get_http_client()
-            
-            # Get list of conversations
-            conversations_response = await client.post(
-                f"{self.base_url}/conversations.list",
+            conversations_response = await self._rate_limited_request(
+                "POST", f"{self.base_url}/conversations.list",
                 headers={"Authorization": f"Bearer {access_token}"},
                 data={"types": "public_channel,private_channel,mpim,im"}
             )
-            
             conversations_data = conversations_response.json()
-            
             if not conversations_data.get('ok'):
                 logger.error(f"Failed to get conversations: {conversations_data.get('error')}")
                 return []
@@ -439,33 +419,21 @@ class SlackIntegration(BaseIntegration):
             artifacts = []
             channels = conversations_data.get('channels', [])
             
-            # Poll each channel for new messages
-            for channel in channels[:20]:  # Limit to 20 channels for performance
+            for channel in channels[:20]:
                 channel_id = channel.get('id')
-                
-                # Get conversation history
-                history_params = {
-                    "channel": channel_id,
-                    "limit": 100
-                }
-                
+                history_params = {"channel": channel_id, "limit": 100}
                 if since:
-                    # Convert to Unix timestamp
                     history_params["oldest"] = since.timestamp()
                 
-                history_response = await client.post(
-                    f"{self.base_url}/conversations.history",
+                history_response = await self._rate_limited_request(
+                    "POST", f"{self.base_url}/conversations.history",
                     headers={"Authorization": f"Bearer {access_token}"},
                     data=history_params
                 )
-                
                 history_data = history_response.json()
                 
                 if history_data.get('ok'):
-                    messages = history_data.get('messages', [])
-                    
-                    for message in messages:
-                        # Process each message
+                    for message in history_data.get('messages', []):
                         event = {
                             'type': 'message',
                             'ts': message.get('ts'),
@@ -476,14 +444,12 @@ class SlackIntegration(BaseIntegration):
                             'thread_ts': message.get('thread_ts'),
                             'reactions': message.get('reactions', [])
                         }
-                        
                         artifact = await self._process_message_event(event)
                         if artifact:
                             artifacts.append(artifact)
             
             logger.info(f"Polled {len(artifacts)} artifacts from Slack")
             return artifacts
-            
         except Exception as e:
             logger.error(f"Slack data polling failed: {e}")
             return []

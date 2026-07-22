@@ -2,22 +2,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import MetaData
 from app.core.config import settings
+from typing import Optional
+import logging
 
-# Database engine
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    future=True
-)
+logger = logging.getLogger(__name__)
 
-# Async session factory
-AsyncSessionLocal = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
-)
+_engine = None
+_async_session_local = None
 
 # Base class for models
 Base = declarative_base()
@@ -26,19 +17,42 @@ Base = declarative_base()
 metadata = MetaData()
 
 
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = create_async_engine(
+            settings.DATABASE_URL,
+            echo=settings.DEBUG,
+            future=True
+        )
+    return _engine
+
+
+def get_async_session_local():
+    global _async_session_local
+    if _async_session_local is None:
+        _async_session_local = async_sessionmaker(
+            get_engine(),
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autocommit=False,
+            autoflush=False
+        )
+    return _async_session_local
+
+
 async def get_db() -> AsyncSession:
-    """Dependency for getting async database sessions"""
-    async with AsyncSessionLocal() as session:
+    session = get_async_session_local()
+    async with session() as db_session:
         try:
-            yield session
+            yield db_session
         finally:
-            await session.close()
+            await db_session.close()
 
 
 async def init_db():
-    """Initialize database tables"""
+    engine = get_engine()
     async with engine.begin() as conn:
-        # Import all models here to ensure they're registered
         from app.models.company import Company
         from app.models.user import User
         from app.models.integration import Integration
@@ -53,5 +67,4 @@ async def init_db():
         from app.models.rest_connector import RESTConnector
         from app.models.webhook_config import WebhookConfig
         
-        # Create all tables
         await conn.run_sync(Base.metadata.create_all)

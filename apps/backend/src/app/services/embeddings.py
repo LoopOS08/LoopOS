@@ -10,8 +10,20 @@ class EmbeddingService:
     """Service for generating text embeddings using OpenAI"""
     
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        self.model = settings.OPENAI_EMBEDDING_MODEL
+        self._client = None
+        self._model = None
+    
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        return self._client
+    
+    @property
+    def model(self):
+        if self._model is None:
+            self._model = settings.OPENAI_EMBEDDING_MODEL
+        return self._model
     
     async def generate_embedding(self, text: str) -> List[float]:
         """

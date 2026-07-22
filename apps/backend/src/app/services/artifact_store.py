@@ -1,6 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from sqlalchemy.dialects.postgresql import vector
 from typing import List, Optional, Dict, Any
 from app.models.artifact import Artifact, SourceTool, ArtifactType
 from app.services.embeddings import embedding_service
@@ -54,7 +53,7 @@ class ArtifactStoreService:
                 author=author,
                 author_email=author_email,
                 source_created_at=source_created_at,
-                metadata=metadata or {},
+                artifact_metadata=metadata or {},
                 embedding=embedding
             )
             
@@ -103,7 +102,7 @@ class ArtifactStoreService:
             if content:
                 artifact.content = content
                 # Regenerate embedding
-                enhanced_metadata = metadata or artifact.metadata
+                enhanced_metadata = metadata or artifact.artifact_metadata
                 enhanced_metadata.update({
                     'source_tool': artifact.source_tool.value,
                     'artifact_type': artifact.artifact_type.value,
@@ -114,7 +113,7 @@ class ArtifactStoreService:
                 )
             
             if metadata:
-                artifact.metadata = metadata
+                artifact.artifact_metadata = metadata
             
             await db.commit()
             await db.refresh(artifact)

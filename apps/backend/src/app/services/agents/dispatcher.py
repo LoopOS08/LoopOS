@@ -31,7 +31,7 @@ class AgentDispatcher:
         # Define routing rules
         self.routing_rules = {
             # Slack messages
-            ('message', 'slack'): ['knowledge', 'operations', 'alignment', 'customer_intelligence', 'spec'],
+            ('message', 'slack'): ['knowledge', 'operations', 'alignment', 'customer_intelligence'],
             
             # Gmail emails
             ('email', 'gmail'): ['customer_intelligence', 'knowledge'],

@@ -1,7 +1,7 @@
 import httpx
 import base64
 import json
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from datetime import datetime, timedelta
 from app.services.integrations.base import BaseIntegration, NormalizedArtifact
 from app.models.integration import SourceTool
@@ -11,18 +11,50 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class GmailPrivacyController:
+    def __init__(self, settings: Dict[str, Any]):
+        self.admin_emails: Set[str] = set(settings.get('authorized_accounts', []))
+        self.opted_out: Set[str] = set(settings.get('opted_out_users', []))
+        self.purge_raw_after_hours: int = settings.get('purge_raw_after_hours', 24)
+        self.privacy_enabled: bool = settings.get('privacy_enabled', True)
+
+    def is_account_authorized(self, email: str) -> bool:
+        if not self.privacy_enabled:
+            return True
+        if not self.admin_emails:
+            return True
+        return email in self.admin_emails
+
+    def is_user_opted_out(self, email: str) -> bool:
+        return email in self.opted_out
+
+    def should_process_email(self, email: str) -> bool:
+        return self.is_account_authorized(email) and not self.is_user_opted_out(email)
+
+    def redact_pii(self, content: str) -> str:
+        import re
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        content = re.sub(email_pattern, '[email redacted]', content)
+        phone_pattern = r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'
+        content = re.sub(phone_pattern, '[phone redacted]', content)
+        return content
+
+    def get_privacy_metadata(self) -> Dict[str, Any]:
+        return {
+            'privacy_mode': 'enabled' if self.privacy_enabled else 'disabled',
+            'purge_raw_after_hours': self.purge_raw_after_hours,
+            'accounts_authorized': len(self.admin_emails),
+            'users_opted_out': len(self.opted_out)
+        }
+
+
 class GmailIntegration(BaseIntegration):
-    """
-    Gmail Integration following three-phase pattern:
-    1. Google OAuth 2.0 Authentication
-    2. Push Notifications (Pub/Sub) + History API (polling)
-    3. Normalization to standard artifact format
-    """
-    
+    """Gmail Integration - three-phase pattern with privacy controls"""
+
     @property
     def source_tool(self) -> SourceTool:
         return SourceTool.GMAIL
-    
+
     @property
     def webhook_events(self) -> List[str]:
         return [
@@ -31,70 +63,61 @@ class GmailIntegration(BaseIntegration):
             'LABEL_ADDED',
             'LABEL_REMOVED'
         ]
-    
+
     def __init__(self, company_id: str, credentials_encrypted: str, settings: Dict[str, Any] = None):
         super().__init__(company_id, credentials_encrypted, settings)
         self.base_url = "https://gmail.googleapis.com/gmail/v1"
         self._http_client = None
-    
+        self.privacy = GmailPrivacyController(settings or {})
+
     async def _get_http_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client"""
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(timeout=30.0)
         return self._http_client
-    
+
     async def authenticate(self) -> bool:
-        """Validate Gmail credentials using a test API call"""
         try:
             credentials = await self.get_credentials()
             access_token = credentials.get('access_token')
-            
             if not access_token:
                 logger.error("No access token in credentials")
                 return False
-            
             client = await self._get_http_client()
             response = await client.get(
                 f"{self.base_url}/users/me/profile",
                 headers={"Authorization": f"Bearer {access_token}"}
             )
-            
             if response.status_code == 200:
                 profile = response.json()
-                logger.info(f"Gmail authentication successful for: {profile.get('emailAddress')}")
+                email = profile.get('emailAddress', '')
+                if not self.privacy.should_process_email(email):
+                    logger.warning(f"Gmail account {email} not authorized or opted out")
+                    return False
+                logger.info(f"Gmail authentication successful for: {email}")
                 return True
-            else:
-                logger.error(f"Gmail authentication failed: {response.status_code}")
-                return False
-            
+            logger.error(f"Gmail authentication failed: {response.status_code}")
+            return False
         except Exception as e:
             logger.error(f"Gmail authentication failed: {e}")
             return False
-    
+
     async def process_webhook(self, event_data: Dict[str, Any]) -> Optional[NormalizedArtifact]:
-        """
-        Process Gmail Pub/Sub push notification
-        Contains email address and message ID
-        """
         try:
-            # Pub/Sub push notification format
             message = event_data.get('message', {})
             data_str = message.get('data')
-            
             if not data_str:
                 logger.warning("No data in Gmail webhook")
                 return None
-            
-            # Decode base64 data
             decoded_data = base64.b64decode(data_str).decode('utf-8')
             notification = json.loads(decoded_data)
-            
             email_address = notification.get('emailAddress')
             history_id = notification.get('historyId')
-            
-            # Fetch the actual message details
+
+            if not self.privacy.should_process_email(email_address):
+                logger.info(f"Gmail privacy filter: skipping {email_address}")
+                return None
+
             return await self._fetch_and_process_message(email_address, history_id)
-            
         except Exception as e:
             logger.error(f"Failed to process Gmail webhook: {e}")
             return None
@@ -154,35 +177,27 @@ class GmailIntegration(BaseIntegration):
             return None
     
     async def _process_message(self, message_data: Dict[str, Any]) -> Optional[NormalizedArtifact]:
-        """Process Gmail message data"""
         try:
-            # Extract headers
             headers = {}
             for header in message_data.get('payload', {}).get('headers', []):
                 headers[header['name']] = header['value']
             
-            # Extract key information
             subject = headers.get('Subject', '(no subject)')
             from_header = headers.get('From', '')
             to_header = headers.get('To', '')
             date_header = headers.get('Date', '')
             
-            # Parse sender
             sender_name, sender_email = self._parse_email_address(from_header)
-            
-            # Parse recipients
             recipients = self._parse_email_addresses(to_header)
-            
-            # Extract message body
             body = self._extract_message_body(message_data.get('payload', {}))
-            
-            # Parse date
             message_date = self._parse_date(date_header)
-            
-            # Build normalized content
-            normalized_content = f"Email from {sender_name} ({sender_email}) to {', '.join(recipients)}: {subject}\n\n{body}"
-            
-            # Build metadata
+
+            content = f"Email from {sender_name} ({sender_email}) to {', '.join(recipients)}: {subject}\n\n{body}"
+
+            if self.privacy.privacy_enabled:
+                content = self.privacy.redact_pii(content)
+                logger.debug(f"PII redacted for message {message_data.get('id')}")
+
             metadata = {
                 'message_id': message_data.get('id'),
                 'thread_id': message_data.get('threadId'),
@@ -193,7 +208,9 @@ class GmailIntegration(BaseIntegration):
                 'bcc': headers.get('Bcc', ''),
                 'labels': message_data.get('labelIds', []),
                 'snippet': message_data.get('snippet', ''),
-                'has_attachments': self._has_attachments(message_data.get('payload', {}))
+                'has_attachments': self._has_attachments(message_data.get('payload', {})),
+                'privacy_applied': self.privacy.privacy_enabled,
+                'purge_raw_after_hours': self.privacy.purge_raw_after_hours
             }
             
             return NormalizedArtifact(
@@ -201,13 +218,12 @@ class GmailIntegration(BaseIntegration):
                 source_tool=self.source_tool,
                 artifact_type=ArtifactType.EMAIL,
                 external_id=message_data.get('id'),
-                content=normalized_content,
+                content=content,
                 author=sender_name,
                 author_email=sender_email,
                 source_created_at=message_date,
                 metadata=metadata
             )
-            
         except Exception as e:
             logger.error(f"Failed to process Gmail message: {e}")
             return None

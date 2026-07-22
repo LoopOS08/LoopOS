@@ -37,55 +37,41 @@ class NotionIntegration(BaseIntegration):
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client"""
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
-                timeout=30.0,
-                headers={
-                    "Authorization": f"Bearer {self._get_access_token()}",
-                    "Notion-Version": "2022-06-28",
-                    "Content-Type": "application/json"
-                }
-            )
+            self._http_client = httpx.AsyncClient(timeout=30.0)
         return self._http_client
     
-    def _get_access_token(self) -> str:
-        """Get access token from credentials (synchronous for headers)"""
-        # This is a simplified version - in production, cache this
-        if self._credentials:
-            return self._credentials.get('access_token', '')
-        return ''
+    async def _get_auth_headers(self) -> Dict[str, str]:
+        credentials = await self.get_credentials()
+        access_token = credentials.get('access_token', '')
+        return {
+            "Authorization": f"Bearer {access_token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json"
+        }
     
     async def authenticate(self) -> bool:
-        """Validate Notion credentials using a test API call"""
         try:
             credentials = await self.get_credentials()
             access_token = credentials.get('access_token')
-            
             if not access_token:
                 logger.error("No access token in credentials")
                 return False
             
             client = await self._get_http_client()
-            response = await client.get(
-                f"{self.base_url}/users/me"
-            )
+            headers = await self._get_auth_headers()
+            response = await client.get(f"{self.base_url}/users/me", headers=headers)
             
             if response.status_code == 200:
                 data = response.json()
                 logger.info(f"Notion authentication successful for: {data.get('name', 'user')}")
                 return True
-            else:
-                logger.error(f"Notion authentication failed: {response.status_code}")
-                return False
-            
+            logger.error(f"Notion authentication failed: {response.status_code}")
+            return False
         except Exception as e:
             logger.error(f"Notion authentication failed: {e}")
             return False
     
     async def process_webhook(self, event_data: Dict[str, Any]) -> Optional[NormalizedArtifact]:
-        """
-        Notion doesn't support webhooks, this is a placeholder for consistency
-        All data comes through polling
-        """
         logger.warning("Notion integration uses polling only, not webhooks")
         return None
     
@@ -153,24 +139,19 @@ class NotionIntegration(BaseIntegration):
         return 'Untitled'
     
     async def _get_page_content(self, page_id: str) -> str:
-        """Get page content with text blocks"""
         try:
             client = await self._get_http_client()
-            
-            # Get page blocks
+            headers = await self._get_auth_headers()
             blocks_response = await client.get(
-                f"{self.base_url}/blocks/{page_id}/children"
+                f"{self.base_url}/blocks/{page_id}/children",
+                headers=headers
             )
-            
             if blocks_response.status_code != 200:
                 logger.warning(f"Failed to get page blocks for {page_id}")
                 return ''
-            
             blocks_data = blocks_response.json()
             blocks = blocks_data.get('results', [])
-            
             return self._extract_text_from_blocks(blocks)
-            
         except Exception as e:
             logger.error(f"Error getting page content: {e}")
             return ''
@@ -314,30 +295,22 @@ class NotionIntegration(BaseIntegration):
         return chunks
     
     async def poll_data(self, since: Optional[datetime] = None) -> List[NormalizedArtifact]:
-        """
-        Poll for data using Notion API
-        Fetches pages updated since the specified time
-        Also used for initial backfill
-        """
         try:
             client = await self._get_http_client()
+            headers = await self._get_auth_headers()
             
-            # Search for pages
             search_query = {
-                "filter": {
-                    "value": "page",
-                    "property": "object"
-                }
+                "filter": {"value": "page", "property": "object"},
+                "sort": {"direction": "descending", "timestamp": "last_edited_time"}
             }
-            
             if since:
-                search_query["filter"] = {
-                    "value": since.isoformat(),
-                    "property": "last_edited_time"
-                }
+                query_since = since.isoformat()
+            else:
+                query_since = (datetime.utcnow() - timedelta(days=7)).isoformat()
             
             search_response = await client.post(
                 f"{self.base_url}/search",
+                headers=headers,
                 json=search_query
             )
             
@@ -349,25 +322,17 @@ class NotionIntegration(BaseIntegration):
             pages = search_data.get('results', [])
             
             artifacts = []
-            
-            # Process each page
-            for page in pages[:50]:  # Limit to 50 pages for performance
+            for page in pages[:50]:
                 artifact = await self._process_page(page)
-                
                 if artifact:
-                    # Check if document needs chunking
                     content_length = len(artifact.content.split())
-                    
                     if content_length > self.chunk_size:
-                        # Chunk the document and create multiple artifacts
                         chunks = self._chunk_document(artifact.content)
-                        
                         for i, chunk in enumerate(chunks):
                             chunk_metadata = artifact.metadata.copy()
                             chunk_metadata['chunk_index'] = i
                             chunk_metadata['total_chunks'] = len(chunks)
                             chunk_metadata['is_chunk'] = True
-                            
                             chunked_artifact = NormalizedArtifact(
                                 company_id=artifact.company_id,
                                 source_tool=artifact.source_tool,
@@ -379,15 +344,12 @@ class NotionIntegration(BaseIntegration):
                                 source_created_at=artifact.source_created_at,
                                 metadata=chunk_metadata
                             )
-                            
                             artifacts.append(chunked_artifact)
                     else:
-                        # No chunking needed
                         artifacts.append(artifact)
             
             logger.info(f"Polled {len(artifacts)} artifacts from Notion (including chunks)")
             return artifacts
-            
         except Exception as e:
             logger.error(f"Notion data polling failed: {e}")
             return []
